@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pvedrill — edge monitor</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+:root{
+  --bg:#0B0E14; --panel:#11151F; --line:#1C2230; --text:#C8CFDA; --mut:#6B7686;
+  --amber:#F5B84B; --up:#3FCF8E; --dn:#E5646E;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font:13px/1.45 ui-monospace,"SF Mono","Cascadia Code",Menlo,Consolas,monospace;padding:20px 16px 48px;max-width:1080px;margin:0 auto}
+h1{font-size:14px;letter-spacing:.18em;font-weight:600;color:var(--amber)}
+.sub{color:var(--mut);font-size:11px;margin-top:2px}
+header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:14px}
+.controls{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+button{background:none;border:1px solid #2A3242;color:var(--mut);font:inherit;font-size:12px;padding:5px 11px;border-radius:7px;cursor:pointer}
+button:hover{color:var(--text)}
+button.on{color:var(--amber);border-color:var(--amber)}
+button:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
+#wallet{background:var(--panel);border:1px solid var(--line);color:var(--text);font:inherit;font-size:11px;padding:6px 9px;border-radius:7px;width:100%;max-width:420px;margin-bottom:12px}
+#status{font-size:11px;color:var(--mut);margin:6px 0 14px;min-height:15px}
+#status.err{color:var(--dn)}
+.strip{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:8px;margin-bottom:8px}
+.cell{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.cell .k{font-size:10px;letter-spacing:.1em;text-transform:lowercase;color:var(--mut)}
+.cell .v{font-size:19px;margin-top:3px;font-variant-numeric:tabular-nums}
+.cell .s{font-size:10px;color:var(--mut);margin-top:1px}
+.up{color:var(--up)} .dn{color:var(--dn)}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.panel .k{font-size:10px;letter-spacing:.1em;color:var(--mut);margin-bottom:8px}
+.panel.sig .k{color:var(--amber)}
+.wide{grid-column:1 / -1}
+.chart{position:relative;height:250px}
+.wide .chart{height:270px}
+table{width:100%;border-collapse:collapse;font-size:11.5px}
+th{text-align:left;color:var(--mut);font-weight:400;font-size:10px;letter-spacing:.08em;padding:4px 6px;border-bottom:1px solid var(--line)}
+td{padding:5px 6px;border-bottom:1px solid #151a26;font-variant-numeric:tabular-nums;white-space:nowrap}
+td.t{max-width:280px;overflow:hidden;text-overflow:ellipsis;color:var(--mut)}
+th.r,td.r{text-align:right}
+@media(max-width:760px){.grid{grid-template-columns:1fr}}
+@media(prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>PVEDRILL — EDGE MONITOR</h1>
+    <div class="sub">polymarket · data-api · realized only</div>
+  </div>
+  <div class="controls">
+    <button data-p="86400">24h</button>
+    <button data-p="604800" class="on">7d</button>
+    <button data-p="2592000">30d</button>
+    <button data-p="0">all</button>
+    <button id="reload">↻</button>
+  </div>
+</header>
+<input id="wallet" value="0x92fae79010ef399d035523a8b7d805fcc1f28b17" spellcheck="false">
+<div id="status">loading…</div>
+
+<div class="strip" id="strip"></div>
+
+<div class="grid">
+  <div class="panel wide"><div class="k">cumulative realized pnl</div><div class="chart"><canvas id="cCum"></canvas></div></div>
+  <div class="panel sig"><div class="k">calibration — realized vs implied win rate by entry bucket</div><div class="chart"><canvas id="cCal"></canvas></div></div>
+  <div class="panel"><div class="k" id="kBar">pnl by day</div><div class="chart"><canvas id="cBar"></canvas></div></div>
+  <div class="panel wide"><div class="k">worst closed positions</div><div id="losers"></div></div>
+</div>
+
+<script>
+const EMBEDDED=null; // replaced by make_snapshot.py with a raw event dump
+const API='https://data-api.polymarket.com';
+const CUTOFF=7200;          // s without activity after which leftover shares count as worthless
+const PAGE=500, MAX_PAGES=20;
+const num=v=>Number(v)||0;
+const usd=x=>(x<0?'-$':'$')+Math.abs(x).toFixed(2);
+const $=id=>document.getElementById(id);
+let period=604800, charts={};
+
+document.querySelectorAll('button[data-p]').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('button[data-p]').forEach(x=>x.classList.remove('on'));
+  b.classList.add('on'); period=+b.dataset.p; run();
+});
+$('reload').onclick=run;
+$('wallet').onchange=run;
+
+async function fetchActivity(user,start){
+  const all=[];
+  for(let p=0;p<MAX_PAGES;p++){
+    $('status').textContent=`loading… page ${p+1}`;
+    const q=`${API}/activity?user=${user}&limit=${PAGE}&offset=${p*PAGE}`+(start?`&start=${start}`:'');
+    const r=await fetch(q);
+    if(!r.ok) throw new Error(`data-api ${r.status}`);
+    const batch=await r.json();
+    all.push(...batch);
+    if(batch.length<PAGE) return {events:all,capped:false};
+  }
+  return {events:all,capped:true};
+}
+
+function process(events){
+  const mkts=new Map(); let rewards=0;
+  events.sort((a,b)=>num(a.timestamp)-num(b.timestamp));
+  for(const e of events){
+    const t=e.type, u=num(e.usdcSize), sz=num(e.size), ts=num(e.timestamp);
+    if(t==='REWARD'){rewards+=u;continue}
+    let m=mkts.get(e.conditionId);
+    if(!m){m={title:e.title||'',firstTs:ts,lastTs:ts,cashIn:0,cashOut:0,buyUsd:0,buyShares:0,shares:{},redeemed:false};mkts.set(e.conditionId,m)}
+    m.lastTs=Math.max(m.lastTs,ts);
+    const oi=e.outcomeIndex??0;
+    if(t==='TRADE'){
+      if(e.side==='BUY'){m.cashOut+=u;m.buyUsd+=u;m.buyShares+=sz;m.shares[oi]=(m.shares[oi]||0)+sz}
+      else{m.cashIn+=u;m.shares[oi]=(m.shares[oi]||0)-sz}
+    }else if(t==='SPLIT'){m.cashOut+=u;m.shares[0]=(m.shares[0]||0)+sz;m.shares[1]=(m.shares[1]||0)+sz}
+    else if(t==='MERGE'){m.cashIn+=u;m.shares[0]=(m.shares[0]||0)-sz;m.shares[1]=(m.shares[1]||0)-sz}
+    else if(t==='REDEEM'){m.cashIn+=u;m.redeemed=true;m.shares={}}
+  }
+  const now=Date.now()/1e3, closed=[], open=[];
+  for(const m of mkts.values()){
+    const rem=Object.values(m.shares).reduce((a,s)=>a+Math.max(0,s),0);
+    m.pnl=m.cashIn-m.cashOut;
+    m.entry=m.buyShares>0?m.buyUsd/m.buyShares:null;
+    const lt=m.title.toLowerCase();
+    m.coin=lt.includes('solana')?'SOL':lt.includes('ethereum')?'ETH':'other';
+    (m.redeemed||rem<0.01||now-m.lastTs>CUTOFF?closed:open).push(m);
+  }
+  return {closed,open,rewards};
+}
+
+function stats(closed,open,rewards){
+  const n=closed.length, wins=closed.filter(m=>m.pnl>0).length;
+  const p=n?wins/n:0, se=n?Math.sqrt(p*(1-p)/n):0;
+  const pnl=closed.reduce((a,m)=>a+m.pnl,0);
+  const vol=closed.reduce((a,m)=>a+m.cashOut,0);
+  const sh=closed.reduce((a,m)=>a+m.buyShares,0);
+  const bu=closed.reduce((a,m)=>a+m.buyUsd,0);
+  const losers=closed.filter(m=>m.pnl<=0);
+  const lOut=losers.reduce((a,m)=>a+m.cashOut,0), lIn=losers.reduce((a,m)=>a+m.cashIn,0);
+  const by=c=>closed.filter(m=>m.coin===c).reduce((a,m)=>a+m.pnl,0);
+  const openRisk=open.reduce((a,m)=>a+m.cashOut-m.cashIn,0);
+  const cells=[
+    ['realized pnl',usd(pnl),null,pnl>=0?'up':'dn'],
+    ['win rate · markets',n?`${(p*100).toFixed(1)}%`:'—',`${wins}/${n} · ±${(se*100).toFixed(1)}pp`],
+    ['edge / share',sh?`${(pnl/sh*100).toFixed(2)}¢`:'—',`implied ${sh?((p-bu/sh)*100).toFixed(2):'—'}¢`],
+    ['avg entry',sh?`${(bu/sh*100).toFixed(1)}¢`:'—',`avg pos ${n?usd(vol/n):'—'}`],
+    ['volume',usd(vol),`${sh.toFixed(0)} shares`],
+    ['recovery on losers',lOut?`${(lIn/lOut*100).toFixed(1)}%`:'—',`${losers.length} losers · ${usd(lIn)} back`],
+    ['sol / eth pnl',`${usd(by('SOL'))} / ${usd(by('ETH'))}`,null],
+    ['open now',String(open.length),`${usd(openRisk)} at risk · rewards ${usd(rewards)}`],
+  ];
+  $('strip').innerHTML=cells.map(([k,v,s,c])=>
+    `<div class="cell"><div class="k">${k}</div><div class="v ${c||''}">${v}</div>${s?`<div class="s">${s}</div>`:''}</div>`).join('');
+}
+
+const GRID={color:'rgba(255,255,255,.05)'}, TICK={color:'#6B7686',font:{size:10}};
+function draw(id,cfg){charts[id]?.destroy();charts[id]=new Chart($(id),cfg)}
+const fmtT=ts=>{const d=new Date(ts*1e3);return `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`};
+
+function drawCum(closed){
+  const s=[...closed].sort((a,b)=>a.lastTs-b.lastTs); let acc=0;
+  const ys=s.map(m=>+(acc+=m.pnl).toFixed(2)), xs=s.map(m=>fmtT(m.lastTs));
+  draw('cCum',{type:'line',data:{labels:xs,datasets:[{data:ys,borderColor:'#F5B84B',borderWidth:1.5,pointRadius:0,fill:{target:'origin',above:'rgba(63,207,142,.06)',below:'rgba(229,100,110,.08)'}}]},
+    options:{maintainAspectRatio:false,plugins:{legend:{display:false}},interaction:{intersect:false,mode:'index'},
+    scales:{x:{grid:GRID,ticks:{...TICK,maxTicksLimit:8,maxRotation:0}},y:{grid:GRID,ticks:{...TICK,callback:v=>'$'+v}}}}});
+}
+
+function drawCal(closed){
+  const edges=[0,.70,.75,.80,.85,.90,.95,1.001];
+  const lbl=['<70¢','70–75','75–80','80–85','85–90','90–95','95+'];
+  const b=edges.slice(0,-1).map(()=>({n:0,w:0,eSum:0,sh:0}));
+  for(const m of closed){ if(m.entry==null)continue;
+    const i=edges.findIndex((e,j)=>m.entry>=e&&m.entry<edges[j+1]); if(i<0)continue;
+    b[i].n++; if(m.pnl>0)b[i].w++; b[i].eSum+=m.entry*m.buyShares; b[i].sh+=m.buyShares;
+  }
+  const keep=b.map((x,i)=>({...x,l:lbl[i]})).filter(x=>x.n>0);
+  draw('cCal',{data:{labels:keep.map(x=>[x.l,`n=${x.n}`]),datasets:[
+      {type:'bar',label:'realized',data:keep.map(x=>+(x.w/x.n*100).toFixed(1)),backgroundColor:'rgba(245,184,75,.55)',borderRadius:3},
+      {type:'line',label:'implied (avg entry)',data:keep.map(x=>+(x.eSum/x.sh*100).toFixed(1)),borderColor:'#C8CFDA',borderDash:[5,4],borderWidth:1.2,pointRadius:2.5,pointBackgroundColor:'#C8CFDA'}]},
+    options:{maintainAspectRatio:false,plugins:{legend:{labels:{...TICK,boxWidth:10}}},
+    scales:{x:{grid:{display:false},ticks:TICK},y:{grid:GRID,ticks:{...TICK,callback:v=>v+'%'},suggestedMin:50,suggestedMax:100}}}});
+}
+
+function drawBar(closed){
+  const span=closed.length?Math.max(...closed.map(m=>m.lastTs))-Math.min(...closed.map(m=>m.lastTs)):0;
+  const hourly=span<=2*86400;
+  $('kBar').textContent=hourly?'pnl by hour':'pnl by day';
+  const g=new Map();
+  for(const m of closed){
+    const d=new Date(m.lastTs*1e3);
+    const k=hourly?`${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}h`:`${d.getMonth()+1}/${d.getDate()}`;
+    g.set(k,(g.get(k)||0)+m.pnl);
+  }
+  const xs=[...g.keys()], ys=[...g.values()].map(v=>+v.toFixed(2));
+  draw('cBar',{type:'bar',data:{labels:xs,datasets:[{data:ys,backgroundColor:ys.map(v=>v>=0?'rgba(63,207,142,.6)':'rgba(229,100,110,.6)'),borderRadius:3}]},
+    options:{maintainAspectRatio:false,plugins:{legend:{display:false}},
+    scales:{x:{grid:{display:false},ticks:{...TICK,maxTicksLimit:10,maxRotation:0}},y:{grid:GRID,ticks:{...TICK,callback:v=>'$'+v}}}}});
+}
+
+function drawLosers(closed){
+  const rows=[...closed].sort((a,b)=>a.pnl-b.pnl).slice(0,12).filter(m=>m.pnl<0);
+  $('losers').innerHTML=rows.length?`<table><tr><th>closed</th><th>market</th><th class="r">entry</th><th class="r">cost</th><th class="r">recovered</th><th class="r">pnl</th></tr>`+
+    rows.map(m=>`<tr><td>${fmtT(m.lastTs)}</td><td class="t">${m.title}</td><td class="r">${m.entry?(m.entry*100).toFixed(1)+'¢':'—'}</td><td class="r">${usd(m.cashOut)}</td><td class="r">${m.cashOut?(m.cashIn/m.cashOut*100).toFixed(0)+'%':'—'}</td><td class="r dn">${usd(m.pnl)}</td></tr>`).join('')+
+    `</table>`:'<div class="sub">no losing positions in period</div>';
+}
+
+async function run(){
+  const st=$('status'); st.classList.remove('err');
+  try{
+    const t0=performance.now();
+    const user=$('wallet').value.trim();
+    const start=period?Math.floor(Date.now()/1e3)-period:0;
+    let events,capped=false;
+    if(EMBEDDED){events=start?EMBEDDED.filter(e=>num(e.timestamp)>=start):[...EMBEDDED]}
+    else ({events,capped}=await fetchActivity(user,start));
+    const {closed,open,rewards}=process(events);
+    stats(closed,open,rewards);
+    drawCum(closed); drawCal(closed); drawBar(closed); drawLosers(closed);
+    st.textContent=`${closed.length} closed markets · ${events.length} events · ${((performance.now()-t0)/1e3).toFixed(1)}s`
+      +(EMBEDDED?' · snapshot':'')+(capped?` · hit ${PAGE*MAX_PAGES}-event cap, oldest trades truncated`:'');
+  }catch(e){
+    st.classList.add('err');
+    st.textContent=`${e.message} — if this is a blocked/CORS fetch, download the file and open it directly in a browser`;
+  }
+}
+run();
+</script>
+</body>
+</html>
