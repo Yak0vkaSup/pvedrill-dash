@@ -20,8 +20,7 @@ body{background:var(--bg);color:var(--text);font:15px/1.45 -apple-system,system-
   padding:calc(env(safe-area-inset-top) + 14px) 12px calc(env(safe-area-inset-bottom) + 74px);
   max-width:720px;margin:0 auto}
 .mono{font-family:ui-monospace,"SF Mono",Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
-header h1{font-size:15px;letter-spacing:.22em;font-weight:700;color:var(--amber);font-family:ui-monospace,"SF Mono",Menlo,monospace}
-header .tag{font-size:11px;color:var(--mut);letter-spacing:.08em}
+header h1{font-size:16px;letter-spacing:.22em;font-weight:700;color:var(--amber);font-family:ui-monospace,"SF Mono",Menlo,monospace;text-transform:uppercase}
 #status{font-size:12px;color:var(--mut);margin:4px 0 12px;min-height:16px}
 #status.err{color:var(--dn)}
 .chips{display:flex;gap:6px;margin-bottom:8px}
@@ -32,8 +31,11 @@ header .tag{font-size:11px;color:var(--mut);letter-spacing:.08em}
 .dates input{flex:1;background:var(--panel);border:1px solid var(--line);color:var(--text);border-radius:10px;
   padding:9px 10px;font:16px/1 inherit;min-width:0}
 .dates span{color:var(--mut)}
-#wallet{width:100%;background:none;border:none;color:var(--mut);font:11px/1 ui-monospace,Menlo,monospace;
-  padding:2px 2px 10px;overflow:hidden;text-overflow:ellipsis}
+.wrow{display:flex;gap:6px;margin-bottom:12px}
+#wallet{flex:1;background:var(--panel);border:1px solid var(--line);color:var(--mut);border-radius:10px;
+  padding:10px;font:12px/1 ui-monospace,Menlo,monospace;min-width:0}
+#go{background:var(--panel);border:1px solid var(--line);color:var(--amber);font:600 13px/1 inherit;
+  font-family:inherit;padding:0 18px;border-radius:10px;cursor:pointer}
 section[hidden]{display:none}
 .cells{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px}
 .cell{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px 14px;min-width:0}
@@ -72,8 +74,7 @@ button:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
 </head>
 <body>
 <header>
-  <h1>PVEDRILL</h1>
-  <span class="tag">edge monitor · polymarket data-api · realized only</span>
+  <h1 id="acct">·</h1>
   <div id="status">loading…</div>
 </header>
 
@@ -88,7 +89,10 @@ button:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
   <span>→</span>
   <input type="date" id="dTo" aria-label="to date">
 </div>
-<input id="wallet" value="0x92fae79010ef399d035523a8b7d805fcc1f28b17" spellcheck="false" aria-label="wallet">
+<div class="wrow">
+  <input id="wallet" value="0x92fae79010ef399d035523a8b7d805fcc1f28b17" spellcheck="false" aria-label="wallet address">
+  <button id="go">load</button>
+</div>
 
 <main>
 <section id="sec-ov">
@@ -306,9 +310,6 @@ function cellHTML(k,v,s,c,kStyle){return `<div class="cell"><div class="k"${kSty
 
 function renderStats(v){
   const pf=v.grossL<0?(v.grossW/-v.grossL).toFixed(2):'∞';
-  const shareWR=v.sh?v.winSh/v.sh:null;
-  const top=v.coins.slice(0,2).map((c,i)=>
-    `<span style="color:${coinColor(c.coin,v.coins.indexOf(c))}">${c.coin}</span> <span class="${c.pnl>=0?'up':'dn'}">${usd(c.pnl)}</span>`).join(' · ');
   $('cells').innerHTML=[
     cellHTML('net pnl',usd(v.pnl),`trade ${usd(v.gross)} · pf ${pf}`,v.pnl>=0?'up':'dn'),
     cellHTML('fees · est taker',usd(-v.fees),v.vol?`${(v.fees/v.vol*100).toFixed(2)}% of volume`:'',v.fees>0?'dn':''),
@@ -317,10 +318,6 @@ function renderStats(v){
       v.sh?`gross ${(v.gross/v.sh*100).toFixed(2)}¢ − fees ${(v.fees/v.sh*100).toFixed(2)}¢`:''),
     cellHTML('sharpe · daily ann.',v.sharpe!=null?v.sharpe.toFixed(2):'—',`max dd ${usd(v.dd)}`),
     cellHTML('volume',usd(v.vol),`${v.sh.toFixed(0)} shares · avg pos ${v.n?usd(v.vol/v.n):'—'}`),
-    cellHTML('recovery on losers',v.lOut?(v.lIn/v.lOut*100).toFixed(1)+'%':'—',`${v.losers.length} losers · ${usd(v.lIn)} back`),
-    cellHTML('coins',top||'—',shareWR!=null?`${(shareWR*100).toFixed(1)}% of shares won · paid ${(v.bu/v.sh*100).toFixed(1)}¢`:''),
-    cellHTML('open now',String(v.open.length),
-      `${usd(v.open.reduce((a,m)=>a+m.cashOut-m.cashIn,0))} at risk · rewards ${usd(v.rewards)}`),
   ].join('');
 }
 
@@ -424,7 +421,7 @@ function setChip(days){
   const now=new Date();
   $('dTo').value=isoDay(now);
   if(days){$('dFrom').value=isoDay(new Date(now.getTime()-days*86400e3))}
-  else if(EMBEDDED&&EMBEDDED.length){$('dFrom').value=isoDay(new Date(Math.min(...EMBEDDED.map(e=>num(e.timestamp)))*1e3))}
+  else if(EMBEDDED&&EMBEDDED.length&&$('wallet').value.trim()===BAKED){$('dFrom').value=isoDay(new Date(Math.min(...EMBEDDED.map(e=>num(e.timestamp)))*1e3))}
   else{$('dFrom').value=''}
 }
 document.querySelectorAll('#chips button').forEach(b=>b.onclick=()=>{setChip(+b.dataset.d);refresh()});
@@ -440,25 +437,33 @@ document.querySelectorAll('#seg button').forEach(b=>b.onclick=()=>{
   document.querySelectorAll('#seg button').forEach(x=>x.classList.toggle('on',x===b));
   if(view)renderFeed(view);
 });
+const BAKED=$('wallet').value.trim();
+$('go').onclick=refresh;
+$('wallet').addEventListener('keydown',e=>{if(e.key==='Enter'){e.target.blur();refresh()}});
 
 async function refresh(){
   const st=$('status'); st.classList.remove('err');
   try{
     const t0=performance.now();
     const [f,t]=range();
+    const wallet=$('wallet').value.trim();
+    const useSnap=EMBEDDED&&wallet===BAKED;
     let events,capped=false;
-    if(EMBEDDED){events=EMBEDDED.filter(e=>{const ts=num(e.timestamp);return(!f||ts>=f)&&(!t||ts<=t)})}
-    else ({events,capped}=await fetchActivity($('wallet').value.trim(),f,t));
+    if(useSnap){events=EMBEDDED.filter(e=>{const ts=num(e.timestamp);return(!f||ts>=f)&&(!t||ts<=t)})}
+    else ({events,capped}=await fetchActivity(wallet,f,t));
     view=compute(events);
+    const who=events.find(e=>e.name||e.pseudonym);
+    $('acct').textContent=who?.name||who?.pseudonym||`${wallet.slice(0,6)}…${wallet.slice(-4)}`;
+    document.title=$('acct').textContent+' — dashboard';
     renderStats(view); renderCoinCells(view); renderFeed(view);
     dirty={ov:1,edge:1,coin:1}; drawTab(activeTab);
     let note='';
-    if(EMBEDDED&&EMBEDDED.length&&f){
+    if(useSnap&&EMBEDDED.length&&f){
       const min=Math.min(...EMBEDDED.map(e=>num(e.timestamp)));
       if(f<min-86400)note=` · ⚠ snapshot starts ${fmtD(min)}`;
     }
     st.textContent=`${view.n} markets · ${view.events} events · ${((performance.now()-t0)/1e3).toFixed(1)}s`
-      +(EMBEDDED?' · snapshot':'')+note+(capped?` · ${PAGE*MAX_PAGES}-event cap hit`:'');
+      +(useSnap?' · snapshot':'')+note+(capped?` · ${PAGE*MAX_PAGES}-event cap hit`:'');
   }catch(e){
     st.classList.add('err');
     st.textContent=`${e.message} — if this is a blocked fetch, use the snapshot page`;
