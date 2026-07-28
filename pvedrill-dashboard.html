@@ -11,7 +11,7 @@
 <style>
 :root{
   --bg:#0A0D13; --panel:#12161F; --line:#1E2530; --text:#D6DCE6; --mut:#78828F;
-  --amber:#F5B84B; --up:#34D399; --dn:#F87171; --sol:#A15CFF; --eth:#7B94F5;
+  --amber:#F5B84B; --up:#34D399; --dn:#F87171;
   color-scheme:dark;
 }
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
@@ -37,10 +37,11 @@ header .tag{font-size:11px;color:var(--mut);letter-spacing:.08em}
 section[hidden]{display:none}
 .cells{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px}
 .cell{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px 14px;min-width:0}
+.cells>.cell:last-child:nth-child(odd){grid-column:1/-1}
 .cell .k{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--mut)}
 .cell .v{font-size:22px;font-weight:600;margin-top:4px;font-family:ui-monospace,"SF Mono",Menlo,monospace;font-variant-numeric:tabular-nums}
 .cell .s{font-size:11px;color:var(--mut);margin-top:2px;font-family:ui-monospace,Menlo,monospace}
-.up{color:var(--up)} .dn{color:var(--dn)} .sol{color:var(--sol)} .eth{color:var(--eth)}
+.up{color:var(--up)} .dn{color:var(--dn)}
 .panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:8px}
 .panel .k{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--mut);margin-bottom:10px}
 .panel.sig{border-color:rgba(245,184,75,.45)}
@@ -58,7 +59,7 @@ section[hidden]{display:none}
 .row .r{text-align:right;font-family:ui-monospace,"SF Mono",Menlo,monospace;font-variant-numeric:tabular-nums;font-size:14px;font-weight:600;white-space:nowrap}
 .row .r .m{font-weight:400}
 .empty{color:var(--mut);font-size:13px;padding:14px 4px}
-.tabs{position:fixed;left:0;right:0;bottom:0;display:flex;justify-content:center;gap:0;
+.tabs{position:fixed;left:0;right:0;bottom:0;display:flex;justify-content:center;
   background:rgba(10,13,19,.88);-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);
   border-top:1px solid var(--line);padding:8px 8px calc(env(safe-area-inset-bottom) + 8px)}
 .tabs button{flex:1;max-width:180px;background:none;border:none;color:var(--mut);font:600 11px/1.2 inherit;
@@ -92,20 +93,20 @@ button:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
 <main>
 <section id="sec-ov">
   <div class="cells" id="cells"></div>
-  <div class="panel"><div class="k">cumulative realized pnl</div><div class="ch"><canvas id="cCum"></canvas></div></div>
-  <div class="panel"><div class="k" id="kDaily">pnl per day</div><div class="ch"><canvas id="cDaily"></canvas></div></div>
+  <div class="panel"><div class="k">cumulative pnl — trade · fees · net</div><div class="ch"><canvas id="cCum"></canvas></div></div>
+  <div class="panel"><div class="k" id="kDaily">net pnl per day</div><div class="ch"><canvas id="cDaily"></canvas></div></div>
 </section>
 
 <section id="sec-edge" hidden>
   <div class="panel sig"><div class="k">edge curve — realized minus implied, pp per entry bucket</div><div class="ch"><canvas id="cEdgeB"></canvas></div></div>
-  <div class="panel"><div class="k">pnl per entry bucket</div><div class="ch"><canvas id="cBP"></canvas></div></div>
+  <div class="panel"><div class="k">net pnl per entry bucket</div><div class="ch"><canvas id="cBP"></canvas></div></div>
   <div class="panel"><div class="k">calibration — realized vs implied win rate</div><div class="ch"><canvas id="cCal"></canvas></div></div>
-  <div class="panel"><div class="k">rolling edge per share — last 50 markets</div><div class="ch"><canvas id="cRoll"></canvas></div></div>
+  <div class="panel"><div class="k">rolling net edge per share — last 50 markets</div><div class="ch"><canvas id="cRoll"></canvas></div></div>
 </section>
 
 <section id="sec-coin" hidden>
   <div class="cells" id="coinCells"></div>
-  <div class="panel"><div class="k">cumulative pnl per coin</div><div class="ch"><canvas id="cCoin"></canvas></div></div>
+  <div class="panel"><div class="k">cumulative net pnl per coin</div><div class="ch"><canvas id="cCoin"></canvas></div></div>
 </section>
 
 <section id="sec-feed" hidden>
@@ -130,6 +131,9 @@ button:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
 const EMBEDDED=null; // replaced by make_snapshot.py with a raw event dump
 const API='https://data-api.polymarket.com';
 const CUTOFF=7200;           // s of silence after which leftover shares count as worthless
+// Taker fee on crypto up/down markets: FEE_RATE × price × (1−price) × shares, charged per fill.
+// Makers pay nothing — set FEE_RATE=0 if your fills are maker-side or fees are already in the flows.
+const FEE_RATE=0.07;
 const PAGE=500, MAX_PAGES=40, ROLL=50;
 
 const num=v=>Number(v)||0;
@@ -138,11 +142,21 @@ const $=id=>document.getElementById(id);
 const fmtT=ts=>{const d=new Date(ts*1e3);return `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`};
 const fmtD=ts=>{const d=new Date(ts*1e3);return `${d.getMonth()+1}/${d.getDate()}`};
 const isoDay=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+
+const TICKER={bitcoin:'BTC',ethereum:'ETH',solana:'SOL',xrp:'XRP',ripple:'XRP',dogecoin:'DOGE',
+  cardano:'ADA',litecoin:'LTC',chainlink:'LINK',avalanche:'AVAX',bnb:'BNB'};
+const COINC={BTC:'#F7931A',ETH:'#7B94F5',SOL:'#A15CFF',XRP:'#2DD4BF',DOGE:'#EAB308'};
+const PAL=['#F472B6','#4ADE80','#60A5FA','#FB923C','#C084FC','#94A3B8'];
+const coinColor=(c,i)=>COINC[c]||PAL[i%PAL.length];
+function coinOf(title){
+  const cut=title.split(/ Up or Down/i)[0].trim();
+  if(cut===title.trim())return 'OTHER';
+  return TICKER[cut.toLowerCase()]||cut.toUpperCase().slice(0,6);
+}
 const shortTitle=(m)=>{
-  const c=m.coin!=='other'?m.coin:'';
   const t=m.title.match(/- (\w+) (\d+), (.+?) ET/);
   const arrow=m.outcome==='Up'?'↑':m.outcome==='Down'?'↓':'';
-  return `${c}${arrow} ${t?`${t[1].slice(0,3)} ${t[2]} ${t[3]}`:m.title}`.trim();
+  return `${m.coin!=='OTHER'?m.coin:''}${arrow} ${t?`${t[1].slice(0,3)} ${t[2]} ${t[3]}`:m.title}`.trim();
 };
 
 let view=null, activeTab='ov', feedMode='best', dirty={};
@@ -171,11 +185,13 @@ function compute(events){
     const t=e.type,u=num(e.usdcSize),sz=num(e.size),ts=num(e.timestamp);
     if(t==='REWARD'){rewards+=u;continue}
     let m=mkts.get(e.conditionId);
-    if(!m){m={title:e.title||'',outcome:null,firstTs:ts,lastTs:ts,cashIn:0,cashOut:0,
+    if(!m){m={title:e.title||'',outcome:null,firstTs:ts,lastTs:ts,cashIn:0,cashOut:0,fees:0,
       buyUsd:0,buyShares:0,legUsd:{},legSh:{},shares:{},redeemed:false};mkts.set(e.conditionId,m)}
     m.lastTs=Math.max(m.lastTs,ts);
     const oi=e.outcomeIndex??0;
     if(t==='TRADE'){
+      const pr=num(e.price);
+      m.fees+=FEE_RATE*pr*(1-pr)*sz;
       if(e.side==='BUY'){
         m.cashOut+=u;m.buyUsd+=u;m.buyShares+=sz;
         m.legUsd[oi]=(m.legUsd[oi]||0)+u;m.legSh[oi]=(m.legSh[oi]||0)+sz;
@@ -189,36 +205,49 @@ function compute(events){
   const now=Date.now()/1e3, closed=[], open=[];
   for(const m of mkts.values()){
     const rem=Object.values(m.shares).reduce((a,s)=>a+Math.max(0,s),0);
-    m.pnl=m.cashIn-m.cashOut;
+    m.gross=m.cashIn-m.cashOut;
+    m.net=m.gross-m.fees;
     const dom=Object.keys(m.legSh).sort((a,b)=>m.legSh[b]-m.legSh[a])[0]; // dominant leg for entry price
     m.entry=dom!=null&&m.legSh[dom]>0?m.legUsd[dom]/m.legSh[dom]:null;
-    const lt=m.title.toLowerCase();
-    m.coin=lt.includes('solana')?'SOL':lt.includes('ethereum')?'ETH':'other';
+    m.coin=coinOf(m.title);
     (m.redeemed||rem<0.01||now-m.lastTs>CUTOFF?closed:open).push(m);
   }
 
-  // aggregates
-  const n=closed.length, wins=closed.filter(m=>m.pnl>0);
+  // aggregates (net unless named otherwise)
+  const n=closed.length, wins=closed.filter(m=>m.net>0);
   const p=n?wins.length/n:0, se=n?Math.sqrt(p*(1-p)/n):0;
-  const pnl=closed.reduce((a,m)=>a+m.pnl,0);
+  const gross=closed.reduce((a,m)=>a+m.gross,0);
+  const fees=closed.reduce((a,m)=>a+m.fees,0);
+  const pnl=gross-fees;
   const vol=closed.reduce((a,m)=>a+m.cashOut,0);
   const sh=closed.reduce((a,m)=>a+m.buyShares,0);
   const bu=closed.reduce((a,m)=>a+m.buyUsd,0);
   const winSh=wins.reduce((a,m)=>a+m.buyShares,0);
-  const grossW=wins.reduce((a,m)=>a+m.pnl,0);
-  const losers=closed.filter(m=>m.pnl<=0);
-  const grossL=losers.reduce((a,m)=>a+m.pnl,0);
+  const grossW=wins.reduce((a,m)=>a+m.net,0);
+  const losers=closed.filter(m=>m.net<=0);
+  const grossL=losers.reduce((a,m)=>a+m.net,0);
   const lOut=losers.reduce((a,m)=>a+m.cashOut,0), lIn=losers.reduce((a,m)=>a+m.cashIn,0);
 
-  // daily pnl + sharpe + drawdown
+  // series over close order
   const byClose=[...closed].sort((a,b)=>a.lastTs-b.lastTs);
+  let gT=0,gF=0,peak=0,dd=0;
+  const sTrade=[],sFee=[],sNet=[];
+  for(const m of byClose){
+    gT+=m.gross; gF+=m.fees; const nv=gT-gF;
+    sTrade.push({x:m.lastTs,y:+gT.toFixed(2)});
+    sFee.push({x:m.lastTs,y:+(-gF).toFixed(2)});
+    sNet.push({x:m.lastTs,y:+nv.toFixed(2)});
+    peak=Math.max(peak,nv); dd=Math.min(dd,nv-peak);
+  }
+
+  // daily net pnl + sharpe
   const span=byClose.length?byClose.at(-1).lastTs-byClose[0].lastTs:0;
   const hourly=span<=2*86400;
   const daily=new Map();
   for(const m of byClose){
     const d=new Date(m.lastTs*1e3);
     const k=hourly?`${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}h`:isoDay(d);
-    daily.set(k,(daily.get(k)||0)+m.pnl);
+    daily.set(k,(daily.get(k)||0)+m.net);
   }
   const dayVals=hourly?[]:[...daily.values()];
   let sharpe=null;
@@ -227,103 +256,104 @@ function compute(events){
     const sd=Math.sqrt(dayVals.reduce((a,b)=>a+(b-mean)**2,0)/(dayVals.length-1));
     if(sd>0)sharpe=mean/sd*Math.sqrt(365);
   }
-  let acc=0,peak=0,dd=0;
-  const cum=byClose.map(m=>{acc+=m.pnl;peak=Math.max(peak,acc);dd=Math.min(dd,acc-peak);return{x:m.lastTs,y:+acc.toFixed(2)}});
 
-  // buckets
+  // buckets (net)
   const edges=[0,.70,.75,.80,.85,.90,.95,1.001];
   const lbl=['<70¢','70–75','75–80','80–85','85–90','90–95','95+'];
   const buckets=edges.slice(0,-1).map((_,i)=>({l:lbl[i],n:0,w:0,eSum:0,sh:0,pnl:0}));
   for(const m of closed){
     if(m.entry==null)continue;
     const i=edges.findIndex((e,j)=>m.entry>=e&&m.entry<edges[j+1]); if(i<0)continue;
-    const b=buckets[i]; b.n++; if(m.pnl>0)b.w++; b.eSum+=m.entry*m.buyShares; b.sh+=m.buyShares; b.pnl+=m.pnl;
+    const b=buckets[i]; b.n++; if(m.net>0)b.w++; b.eSum+=m.entry*m.buyShares; b.sh+=m.buyShares; b.pnl+=m.net;
   }
 
-  // rolling edge per share
+  // rolling net edge per share
   const W=Math.min(ROLL,byClose.length), rolling=[];
   if(byClose.length>=10){
     let wp=0,ws=0;
     for(let i=0;i<byClose.length;i++){
-      wp+=byClose[i].pnl; ws+=byClose[i].buyShares;
-      if(i>=W){wp-=byClose[i-W].pnl; ws-=byClose[i-W].buyShares}
+      wp+=byClose[i].net; ws+=byClose[i].buyShares;
+      if(i>=W){wp-=byClose[i-W].net; ws-=byClose[i-W].buyShares}
       if(i>=W-1&&ws>0)rolling.push({x:byClose[i].lastTs,y:+(wp/ws*100).toFixed(2)});
     }
   }
 
-  // coins
-  const coins={};
-  for(const c of['SOL','ETH']){
-    const cs=closed.filter(m=>m.coin===c);
-    const cw=cs.filter(m=>m.pnl>0).length, csh=cs.reduce((a,m)=>a+m.buyShares,0);
-    let a2=0;
-    coins[c]={n:cs.length,wr:cs.length?cw/cs.length:0,pnl:cs.reduce((a,m)=>a+m.pnl,0),
-      edge:csh?cs.reduce((a,m)=>a+m.pnl,0)/csh*100:null,
-      cum:cs.sort((x,y)=>x.lastTs-y.lastTs).map(m=>({x:m.lastTs,y:+(a2+=m.pnl).toFixed(2)}))};
+  // coins — dynamic
+  const coinAgg=new Map();
+  for(const m of closed){
+    let c=coinAgg.get(m.coin);
+    if(!c){c={coin:m.coin,n:0,w:0,pnl:0,fees:0,sh:0,acc:0,cum:[]};coinAgg.set(m.coin,c)}
+    c.n++; if(m.net>0)c.w++; c.pnl+=m.net; c.fees+=m.fees; c.sh+=m.buyShares;
   }
+  for(const m of byClose){
+    const c=coinAgg.get(m.coin); c.acc+=m.net;
+    c.cum.push({x:m.lastTs,y:+c.acc.toFixed(2)});
+  }
+  const coins=[...coinAgg.values()].sort((a,b)=>Math.abs(b.pnl)-Math.abs(a.pnl));
 
   const trades=events.filter(e=>e.type==='TRADE').sort((a,b)=>num(b.timestamp)-num(a.timestamp)).slice(0,60);
   const activity=[...events].sort((a,b)=>num(b.timestamp)-num(a.timestamp)).slice(0,80);
 
-  return {closed,open,rewards,n,wins:wins.length,p,se,pnl,vol,sh,bu,winSh,grossW,grossL,losers,lOut,lIn,
-    daily,hourly,sharpe,dd,cum,buckets,rolling,coins,
-    best:[...closed].sort((a,b)=>b.pnl-a.pnl).slice(0,10),
-    worst:[...closed].sort((a,b)=>a.pnl-b.pnl).slice(0,10),
+  return {closed,open,rewards,n,wins:wins.length,p,se,gross,fees,pnl,vol,sh,bu,winSh,grossW,grossL,losers,lOut,lIn,
+    sTrade,sFee,sNet,dd,daily,hourly,sharpe,buckets,rolling,coins,
+    best:[...closed].sort((a,b)=>b.net-a.net).slice(0,10),
+    worst:[...closed].sort((a,b)=>a.net-b.net).slice(0,10),
     trades,activity,events:events.length};
 }
 
 // ---- render ----
-function cellHTML(k,v,s,c){return `<div class="cell"><div class="k">${k}</div><div class="v ${c||''}">${v}</div>${s?`<div class="s">${s}</div>`:''}</div>`}
+function cellHTML(k,v,s,c,kStyle){return `<div class="cell"><div class="k"${kStyle?` style="color:${kStyle}"`:''}>${k}</div><div class="v ${c||''}">${v}</div>${s?`<div class="s">${s}</div>`:''}</div>`}
 
 function renderStats(v){
   const pf=v.grossL<0?(v.grossW/-v.grossL).toFixed(2):'∞';
   const shareWR=v.sh?v.winSh/v.sh:null;
+  const top=v.coins.slice(0,2).map((c,i)=>
+    `<span style="color:${coinColor(c.coin,v.coins.indexOf(c))}">${c.coin}</span> <span class="${c.pnl>=0?'up':'dn'}">${usd(c.pnl)}</span>`).join(' · ');
   $('cells').innerHTML=[
-    cellHTML('realized pnl',usd(v.pnl),`profit factor ${pf}`,v.pnl>=0?'up':'dn'),
+    cellHTML('net pnl',usd(v.pnl),`trade ${usd(v.gross)} · pf ${pf}`,v.pnl>=0?'up':'dn'),
+    cellHTML('fees · est taker',usd(-v.fees),v.vol?`${(v.fees/v.vol*100).toFixed(2)}% of volume`:'',v.fees>0?'dn':''),
     cellHTML('win rate · markets',v.n?(v.p*100).toFixed(1)+'%':'—',`${v.wins}/${v.n} · ±${(v.se*100).toFixed(1)}pp`),
-    cellHTML('edge / share',v.sh?(v.pnl/v.sh*100).toFixed(2)+'¢':'—',
-      shareWR!=null?`${(shareWR*100).toFixed(1)}% of shares won · paid ${(v.bu/v.sh*100).toFixed(1)}¢`:''),
+    cellHTML('net edge / share',v.sh?(v.pnl/v.sh*100).toFixed(2)+'¢':'—',
+      v.sh?`gross ${(v.gross/v.sh*100).toFixed(2)}¢ − fees ${(v.fees/v.sh*100).toFixed(2)}¢`:''),
     cellHTML('sharpe · daily ann.',v.sharpe!=null?v.sharpe.toFixed(2):'—',`max dd ${usd(v.dd)}`),
     cellHTML('volume',usd(v.vol),`${v.sh.toFixed(0)} shares · avg pos ${v.n?usd(v.vol/v.n):'—'}`),
     cellHTML('recovery on losers',v.lOut?(v.lIn/v.lOut*100).toFixed(1)+'%':'—',`${v.losers.length} losers · ${usd(v.lIn)} back`),
-    cellHTML('sol / eth pnl',`<span class="sol">${usd(v.coins.SOL.pnl)}</span> <span class="eth">${usd(v.coins.ETH.pnl)}</span>`,null),
+    cellHTML('coins',top||'—',shareWR!=null?`${(shareWR*100).toFixed(1)}% of shares won · paid ${(v.bu/v.sh*100).toFixed(1)}¢`:''),
     cellHTML('open now',String(v.open.length),
       `${usd(v.open.reduce((a,m)=>a+m.cashOut-m.cashIn,0))} at risk · rewards ${usd(v.rewards)}`),
   ].join('');
 }
 
 function renderCoinCells(v){
-  $('coinCells').innerHTML=['SOL','ETH'].map(c=>{
-    const x=v.coins[c];
-    return cellHTML(c,usd(x.pnl),
-      `${x.n} mkts · wr ${x.n?(x.wr*100).toFixed(1):'—'}% · ${x.edge!=null?x.edge.toFixed(2)+'¢/sh':'—'}`,
-      x.pnl>=0?(c==='SOL'?'sol':'eth'):'dn');
-  }).join('');
+  $('coinCells').innerHTML=v.coins.map((c,i)=>
+    cellHTML(c.coin,usd(c.pnl),
+      `${c.n} mkts · wr ${(c.w/c.n*100).toFixed(1)}% · ${c.sh?(c.pnl/c.sh*100).toFixed(2)+'¢/sh':'—'} · fees ${usd(c.fees)}`,
+      c.pnl>=0?'up':'dn',coinColor(c.coin,i))
+  ).join('')||'<div class="empty">no closed markets in range</div>';
 }
 
 function posRow(m){
   return `<div class="row"><div class="l"><div class="t">${shortTitle(m)}</div>
-    <div class="m">${fmtT(m.lastTs)} · in ${m.entry?(m.entry*100).toFixed(1)+'¢':'—'} · cost ${usd(m.cashOut)}</div></div>
-    <div class="r ${m.pnl>=0?'up':'dn'}">${usd(m.pnl)}</div></div>`;
+    <div class="m">${fmtT(m.lastTs)} · in ${m.entry?(m.entry*100).toFixed(1)+'¢':'—'} · cost ${usd(m.cashOut)} · fee ${usd(m.fees)}</div></div>
+    <div class="r ${m.net>=0?'up':'dn'}">${usd(m.net)}</div></div>`;
 }
 function tradeRow(e){
   const buy=e.side==='BUY';
-  return `<div class="row"><div class="l"><div class="t"><span class="${buy?'up':'dn'}">${buy?'BUY':'SELL'}</span> ${e.outcome||''} · ${(e.title||'').replace(' Up or Down','')}</div>
+  return `<div class="row"><div class="l"><div class="t"><span class="${buy?'up':'dn'}">${buy?'BUY':'SELL'}</span> ${e.outcome||''} · ${(e.title||'').replace(/ Up or Down/i,'')}</div>
     <div class="m">${fmtT(num(e.timestamp))}</div></div>
     <div class="r">${(num(e.price)*100).toFixed(1)}¢ × ${num(e.size).toFixed(0)}<div class="m">${usd(num(e.usdcSize))}</div></div></div>`;
 }
 function actRow(e){
   if(e.type==='TRADE')return tradeRow(e);
   const label={REDEEM:'REDEEM',REWARD:'REWARD',SPLIT:'SPLIT',MERGE:'MERGE',CONVERSION:'CONV'}[e.type]||e.type;
-  return `<div class="row"><div class="l"><div class="t"><span class="${e.type==='REWARD'?'up':''}">${label}</span> ${(e.title||'').replace(' Up or Down','')}</div>
+  return `<div class="row"><div class="l"><div class="t"><span class="${e.type==='REWARD'?'up':''}">${label}</span> ${(e.title||'').replace(/ Up or Down/i,'')}</div>
     <div class="m">${fmtT(num(e.timestamp))}</div></div>
     <div class="r up">+${usd(num(e.usdcSize))}</div></div>`;
 }
 function renderFeed(v){
-  const l=$('list');
   const src={best:v.best.map(posRow),worst:v.worst.map(posRow),
     trades:v.trades.map(tradeRow),activity:v.activity.map(actRow)}[feedMode];
-  l.innerHTML=src.length?src.join(''):'<div class="empty">nothing in range</div>';
+  $('list').innerHTML=src.length?src.join(''):'<div class="empty">nothing in range</div>';
 }
 
 // ---- charts ----
@@ -331,15 +361,21 @@ const GRID={color:'rgba(255,255,255,.05)'}, TICK={color:'#78828F',font:{size:10}
 const XT={type:'linear',grid:GRID,ticks:{...TICK,maxTicksLimit:6,callback:v=>fmtD(v)}};
 function draw(id,cfg){charts[id]?.destroy();charts[id]=new Chart($(id),cfg)}
 const NOLEG={plugins:{legend:{display:false}},maintainAspectRatio:false};
+const zeroAmber=c=>c.tick.value===0?'rgba(245,184,75,.5)':'rgba(255,255,255,.05)';
 
 function drawTab(t){
   if(!view||!dirty[t])return; const v=view; dirty[t]=false;
   if(t==='ov'){
-    draw('cCum',{type:'line',data:{datasets:[{data:v.cum,borderColor:'#F5B84B',borderWidth:1.5,pointRadius:0,
-      fill:{target:'origin',above:'rgba(52,211,153,.06)',below:'rgba(248,113,113,.08)'}}]},
-      options:{...NOLEG,parsing:false,interaction:{intersect:false,mode:'nearest'},
-      scales:{x:XT,y:{grid:GRID,ticks:{...TICK,callback:x=>'$'+x}}}}});
-    $('kDaily').textContent=v.hourly?'pnl per hour':'pnl per day';
+    draw('cCum',{type:'line',data:{datasets:[
+      {label:'net',data:v.sNet,borderColor:'#F5B84B',borderWidth:2,pointRadius:0,
+        fill:{target:'origin',above:'rgba(52,211,153,.05)',below:'rgba(248,113,113,.07)'}},
+      {label:'trade',data:v.sTrade,borderColor:'rgba(52,211,153,.7)',borderWidth:1.2,pointRadius:0},
+      {label:'fees',data:v.sFee,borderColor:'rgba(248,113,113,.7)',borderWidth:1.2,pointRadius:0}]},
+      options:{maintainAspectRatio:false,parsing:false,
+      plugins:{legend:{labels:{...TICK,boxWidth:10}}},
+      interaction:{intersect:false,mode:'nearest'},
+      scales:{x:XT,y:{grid:{...GRID,color:zeroAmber},ticks:{...TICK,callback:x=>'$'+x}}}}});
+    $('kDaily').textContent=v.hourly?'net pnl per hour':'net pnl per day';
     const ks=[...v.daily.keys()],ys=[...v.daily.values()].map(x=>+x.toFixed(2));
     draw('cDaily',{type:'bar',data:{labels:ks.map(k=>v.hourly?k:k.slice(5)),datasets:[{data:ys,
       backgroundColor:ys.map(x=>x>=0?'rgba(52,211,153,.6)':'rgba(248,113,113,.6)'),borderRadius:4}]},
@@ -355,8 +391,7 @@ function drawTab(t){
     draw('cEdgeB',{type:'bar',data:{labels,datasets:[{data:delta,
       backgroundColor:delta.map(x=>x>=0?'rgba(52,211,153,.65)':'rgba(248,113,113,.65)'),borderRadius:4}]},
       options:{...NOLEG,scales:{x:{grid:{display:false},ticks:TICK},
-      y:{grid:{...GRID,color:c=>c.tick.value===0?'rgba(245,184,75,.5)':'rgba(255,255,255,.05)'},
-      ticks:{...TICK,callback:x=>x+'pp'}}}}});
+      y:{grid:{...GRID,color:zeroAmber},ticks:{...TICK,callback:x=>x+'pp'}}}}});
     draw('cBP',{type:'bar',data:{labels,datasets:[{data:kb.map(b=>+b.pnl.toFixed(2)),
       backgroundColor:kb.map(b=>b.pnl>=0?'rgba(52,211,153,.65)':'rgba(248,113,113,.65)'),borderRadius:4}]},
       options:{...NOLEG,scales:{x:{grid:{display:false},ticks:TICK},y:{grid:GRID,ticks:{...TICK,callback:x=>'$'+x}}}}});
@@ -367,16 +402,14 @@ function drawTab(t){
       scales:{x:{grid:{display:false},ticks:TICK},y:{grid:GRID,ticks:{...TICK,callback:x=>x+'%'},suggestedMin:30,suggestedMax:100}}}});
     draw('cRoll',{type:'line',data:{datasets:[{data:v.rolling,borderColor:'#F5B84B',borderWidth:1.5,pointRadius:0}]},
       options:{...NOLEG,parsing:false,scales:{x:XT,
-      y:{grid:{...GRID,color:c=>c.tick.value===0?'rgba(245,184,75,.5)':'rgba(255,255,255,.05)'},
-      ticks:{...TICK,callback:x=>x+'¢'}}}}});
+      y:{grid:{...GRID,color:zeroAmber},ticks:{...TICK,callback:x=>x+'¢'}}}}});
   }
   if(t==='coin'){
-    draw('cCoin',{type:'line',data:{datasets:[
-      {label:'SOL',data:v.coins.SOL.cum,borderColor:'#A15CFF',borderWidth:1.5,pointRadius:0},
-      {label:'ETH',data:v.coins.ETH.cum,borderColor:'#7B94F5',borderWidth:1.5,pointRadius:0}]},
+    draw('cCoin',{type:'line',data:{datasets:v.coins.slice(0,6).map((c,i)=>(
+      {label:c.coin,data:c.cum,borderColor:coinColor(c.coin,i),borderWidth:1.5,pointRadius:0}))},
       options:{maintainAspectRatio:false,parsing:false,plugins:{legend:{labels:{...TICK,boxWidth:10}}},
       interaction:{intersect:false,mode:'nearest'},
-      scales:{x:XT,y:{grid:GRID,ticks:{...TICK,callback:x=>'$'+x}}}}});
+      scales:{x:XT,y:{grid:{...GRID,color:zeroAmber},ticks:{...TICK,callback:x=>'$'+x}}}}});
   }
 }
 
