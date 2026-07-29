@@ -133,11 +133,12 @@ button:focus-visible{outline:2px solid var(--amber);outline-offset:2px}
 
 <script>
 const EMBEDDED=null; // replaced by make_snapshot.py with a raw event dump
+const BUILT=null;    // replaced by make_snapshot.py with the build timestamp
 const API='https://data-api.polymarket.com';
 const CUTOFF=7200;           // s of silence after which leftover shares count as worthless
-// Taker fee on crypto up/down markets: FEE_RATE × price × (1−price) × shares, charged per fill.
-// Makers pay nothing — set FEE_RATE=0 if your fills are maker-side or fees are already in the flows.
-const FEE_RATE=0.07;
+// Fees are observed from the records, not modeled: taker fees are applied at match time and surface
+// either as a worse effective fill (usdcSize vs price×size) or as a redemption payout below the
+// tracked share count. The cash flows are therefore already net of fees.
 const PAGE=500, MAX_PAGES=40, ROLL=50;
 
 const num=v=>Number(v)||0;
@@ -148,7 +149,7 @@ const fmtD=ts=>{const d=new Date(ts*1e3);return `${d.getMonth()+1}/${d.getDate()
 const isoDay=d=>`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 
 const TICKER={bitcoin:'BTC',ethereum:'ETH',solana:'SOL',xrp:'XRP',ripple:'XRP',dogecoin:'DOGE',
-  cardano:'ADA',litecoin:'LTC',chainlink:'LINK',avalanche:'AVAX',bnb:'BNB'};
+  cardano:'ADA',litecoin:'LTC',chainlink:'LINK',avalanche:'AVAX',bnb:'BNB',hyperliquid:'HYPE',sui:'SUI'};
 const COINC={BTC:'#F7931A',ETH:'#7B94F5',SOL:'#A15CFF',XRP:'#2DD4BF',DOGE:'#EAB308'};
 const PAL=['#F472B6','#4ADE80','#60A5FA','#FB923C','#C084FC','#94A3B8'];
 const coinColor=(c,i)=>COINC[c]||PAL[i%PAL.length];
@@ -194,8 +195,8 @@ function compute(events){
     m.lastTs=Math.max(m.lastTs,ts);
     const oi=e.outcomeIndex??0;
     if(t==='TRADE'){
-      const pr=num(e.price);
-      m.fees+=FEE_RATE*pr*(1-pr)*sz;
+      const resid=e.side==='BUY'?u-num(e.price)*sz:num(e.price)*sz-u;
+      if(resid>0.005)m.fees+=resid; // fee visible as slippage vs the recorded price
       if(e.side==='BUY'){
         m.cashOut+=u;m.buyUsd+=u;m.buyShares+=sz;
         m.legUsd[oi]=(m.legUsd[oi]||0)+u;m.legSh[oi]=(m.legSh[oi]||0)+sz;
@@ -204,13 +205,17 @@ function compute(events){
       }else{m.cashIn+=u;m.shares[oi]=(m.shares[oi]||0)-sz}
     }else if(t==='SPLIT'){m.cashOut+=u;m.shares[0]=(m.shares[0]||0)+sz;m.shares[1]=(m.shares[1]||0)+sz}
     else if(t==='MERGE'){m.cashIn+=u;m.shares[0]=(m.shares[0]||0)-sz;m.shares[1]=(m.shares[1]||0)-sz}
-    else if(t==='REDEEM'){m.cashIn+=u;m.redeemed=true;m.shares={}}
+    else if(t==='REDEEM'){
+      const legs=Object.values(m.shares).filter(s=>s>0.01);
+      if(legs.length===1&&legs[0]-u>0.005)m.fees+=legs[0]-u; // fee visible as payout below tracked shares
+      m.cashIn+=u;m.redeemed=true;m.shares={};
+    }
   }
   const now=Date.now()/1e3, closed=[], open=[];
   for(const m of mkts.values()){
     const rem=Object.values(m.shares).reduce((a,s)=>a+Math.max(0,s),0);
-    m.gross=m.cashIn-m.cashOut;
-    m.net=m.gross-m.fees;
+    m.net=m.cashIn-m.cashOut;   // flows are already net of fees
+    m.gross=m.net+m.fees;       // counterfactual without observed fees
     const dom=Object.keys(m.legSh).sort((a,b)=>m.legSh[b]-m.legSh[a])[0]; // dominant leg for entry price
     m.entry=dom!=null&&m.legSh[dom]>0?m.legUsd[dom]/m.legSh[dom]:null;
     m.coin=coinOf(m.title);
@@ -220,9 +225,9 @@ function compute(events){
   // aggregates (net unless named otherwise)
   const n=closed.length, wins=closed.filter(m=>m.net>0);
   const p=n?wins.length/n:0, se=n?Math.sqrt(p*(1-p)/n):0;
-  const gross=closed.reduce((a,m)=>a+m.gross,0);
   const fees=closed.reduce((a,m)=>a+m.fees,0);
-  const pnl=gross-fees;
+  const pnl=closed.reduce((a,m)=>a+m.net,0);
+  const gross=pnl+fees;
   const vol=closed.reduce((a,m)=>a+m.cashOut,0);
   const sh=closed.reduce((a,m)=>a+m.buyShares,0);
   const bu=closed.reduce((a,m)=>a+m.buyUsd,0);
@@ -234,14 +239,14 @@ function compute(events){
 
   // series over close order
   const byClose=[...closed].sort((a,b)=>a.lastTs-b.lastTs);
-  let gT=0,gF=0,peak=0,dd=0;
+  let aN=0,aF=0,peak=0,dd=0;
   const sTrade=[],sFee=[],sNet=[];
   for(const m of byClose){
-    gT+=m.gross; gF+=m.fees; const nv=gT-gF;
-    sTrade.push({x:m.lastTs,y:+gT.toFixed(2)});
-    sFee.push({x:m.lastTs,y:+(-gF).toFixed(2)});
-    sNet.push({x:m.lastTs,y:+nv.toFixed(2)});
-    peak=Math.max(peak,nv); dd=Math.min(dd,nv-peak);
+    aN+=m.net; aF+=m.fees;
+    sTrade.push({x:m.lastTs,y:+(aN+aF).toFixed(2)});
+    sFee.push({x:m.lastTs,y:+(-aF).toFixed(2)});
+    sNet.push({x:m.lastTs,y:+aN.toFixed(2)});
+    peak=Math.max(peak,aN); dd=Math.min(dd,aN-peak);
   }
 
   // daily net pnl + sharpe
@@ -312,7 +317,7 @@ function renderStats(v){
   const pf=v.grossL<0?(v.grossW/-v.grossL).toFixed(2):'∞';
   $('cells').innerHTML=[
     cellHTML('net pnl',usd(v.pnl),`trade ${usd(v.gross)} · pf ${pf}`,v.pnl>=0?'up':'dn'),
-    cellHTML('fees · est taker',usd(-v.fees),v.vol?`${(v.fees/v.vol*100).toFixed(2)}% of volume`:'',v.fees>0?'dn':''),
+    cellHTML('fees · observed',usd(-v.fees),v.vol?`${(v.fees/v.vol*100).toFixed(2)}% of volume`:'',v.fees>0?'dn':''),
     cellHTML('win rate · markets',v.n?(v.p*100).toFixed(1)+'%':'—',`${v.wins}/${v.n} · ±${(v.se*100).toFixed(1)}pp`),
     cellHTML('net edge / share',v.sh?(v.pnl/v.sh*100).toFixed(2)+'¢':'—',
       v.sh?`gross ${(v.gross/v.sh*100).toFixed(2)}¢ − fees ${(v.fees/v.sh*100).toFixed(2)}¢`:''),
@@ -355,6 +360,7 @@ function renderFeed(v){
 
 // ---- charts ----
 const GRID={color:'rgba(255,255,255,.05)'}, TICK={color:'#78828F',font:{size:10}};
+const TT={callbacks:{title:i=>fmtT(i[0].parsed.x)}};
 const XT={type:'linear',grid:GRID,ticks:{...TICK,maxTicksLimit:6,callback:v=>fmtD(v)}};
 function draw(id,cfg){charts[id]?.destroy();charts[id]=new Chart($(id),cfg)}
 const NOLEG={plugins:{legend:{display:false}},maintainAspectRatio:false};
@@ -369,7 +375,7 @@ function drawTab(t){
       {label:'trade',data:v.sTrade,borderColor:'rgba(52,211,153,.7)',borderWidth:1.2,pointRadius:0},
       {label:'fees',data:v.sFee,borderColor:'rgba(248,113,113,.7)',borderWidth:1.2,pointRadius:0}]},
       options:{maintainAspectRatio:false,parsing:false,
-      plugins:{legend:{labels:{...TICK,boxWidth:10}}},
+      plugins:{legend:{labels:{...TICK,boxWidth:10}},tooltip:TT},
       interaction:{intersect:false,mode:'nearest'},
       scales:{x:XT,y:{grid:{...GRID,color:zeroAmber},ticks:{...TICK,callback:x=>'$'+x}}}}});
     $('kDaily').textContent=v.hourly?'net pnl per hour':'net pnl per day';
@@ -398,13 +404,13 @@ function drawTab(t){
       options:{maintainAspectRatio:false,plugins:{legend:{labels:{...TICK,boxWidth:10}}},
       scales:{x:{grid:{display:false},ticks:TICK},y:{grid:GRID,ticks:{...TICK,callback:x=>x+'%'},suggestedMin:30,suggestedMax:100}}}});
     draw('cRoll',{type:'line',data:{datasets:[{data:v.rolling,borderColor:'#F5B84B',borderWidth:1.5,pointRadius:0}]},
-      options:{...NOLEG,parsing:false,scales:{x:XT,
+      options:{maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:TT},parsing:false,scales:{x:XT,
       y:{grid:{...GRID,color:zeroAmber},ticks:{...TICK,callback:x=>x+'¢'}}}}});
   }
   if(t==='coin'){
     draw('cCoin',{type:'line',data:{datasets:v.coins.slice(0,6).map((c,i)=>(
       {label:c.coin,data:c.cum,borderColor:coinColor(c.coin,i),borderWidth:1.5,pointRadius:0}))},
-      options:{maintainAspectRatio:false,parsing:false,plugins:{legend:{labels:{...TICK,boxWidth:10}}},
+      options:{maintainAspectRatio:false,parsing:false,plugins:{legend:{labels:{...TICK,boxWidth:10}},tooltip:TT},
       interaction:{intersect:false,mode:'nearest'},
       scales:{x:XT,y:{grid:{...GRID,color:zeroAmber},ticks:{...TICK,callback:x=>'$'+x}}}}});
   }
@@ -461,6 +467,15 @@ async function refresh(){
     if(useSnap&&EMBEDDED.length&&f){
       const min=Math.min(...EMBEDDED.map(e=>num(e.timestamp)));
       if(f<min-86400)note=` · ⚠ snapshot starts ${fmtD(min)}`;
+    }
+    st.onclick=null; st.style.cursor='';
+    if(useSnap&&BUILT){
+      note+=` · data ${fmtT(BUILT)}`;
+      if(Date.now()/1e3-BUILT>2700){
+        note+=' · ⚠ stale — tap to reload';
+        st.onclick=()=>fetch(location.href,{cache:'reload'}).finally(()=>location.reload());
+        st.style.cursor='pointer';
+      }
     }
     st.textContent=`${view.n} markets · ${view.events} events · ${((performance.now()-t0)/1e3).toFixed(1)}s`
       +(useSnap?' · snapshot':'')+note+(capped?` · ${PAGE*MAX_PAGES}-event cap hit`:'');
