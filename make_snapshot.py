@@ -10,12 +10,13 @@ from tqdm import tqdm
 
 API = "https://data-api.polymarket.com/activity"
 PAGE = 500
+MAX_PAGES = 80  # safety: stop if the API keeps returning full pages
 
 
 def fetch(wallet: str, start: int) -> list:
     events, offset = [], 0
     with tqdm(desc="pages", unit="page") as bar:
-        while True:
+        while offset < MAX_PAGES * PAGE:
             params = {"user": wallet, "limit": PAGE, "offset": offset}
             if start:
                 params["start"] = start
@@ -28,6 +29,8 @@ def fetch(wallet: str, start: int) -> list:
             if len(batch) < PAGE:
                 return events
             offset += PAGE
+    print(f"warning: hit {MAX_PAGES}-page cap, oldest events truncated")
+    return events
 
 
 def main():
@@ -47,6 +50,7 @@ def main():
     if marker not in html:
         raise SystemExit(f"marker not found in {a.template} — wrong template file")
     html = html.replace(marker, "const EMBEDDED=" + json.dumps(events, separators=(",", ":")) + ";", 1)
+    html = html.replace("const BUILT=null;", f"const BUILT={int(time.time())};", 1)
     html = html.replace('value="0x92fae79010ef399d035523a8b7d805fcc1f28b17"', f'value="{a.wallet}"', 1)
     pathlib.Path(a.out).write_text(html)
     print(f"wrote {a.out}")
